@@ -15,9 +15,10 @@
 
 // ^^^^^ do i need this????
 
-//#include <opencv2/imgproc.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <memory>
+#include <mutex>
 
 #include <plugin-support.h>
 //#include "ort-utils/ort-sessino-utils.hpp"
@@ -37,11 +38,11 @@ struct my_filter : public filter_data, public std::enable_shared_from_this<my_fi
 	//cv::Mat backgroundMask;
 	//cv::Mat lastBackgroundMask;
 	//cv::Mat lastImageBGRA;
-	//float temporalSmoothFactor = 0.0f;
-	//float imageSimilarityThreshold = 35.0f;
+	float temporalSmoothFactor = 0.0f;
+	float imageSimilarityThreshold = 35.0f;
 	//bool enableImageSimilarity = true;
-	//int maskEveryXFrames = 1;
-	//int maskEveryXFramesCount = 0;
+	int filterEveryXFrames = 1;
+	int filterEveryXFramesCount = 0;
 	//int64_t blurBackground = 0;
 	//bool enableFocalBlur = false;
 	//float blurFocusPoint = 0.1f;
@@ -111,6 +112,15 @@ obs_properties_t *my_filter_get_properties(void *data)
 
 
 	// filter properties stuffs goes here :)
+	
+
+	/* Image similarity */
+	obs_property_t = *p_enable_image_similarity =
+		obs_properties_add_bool(props, "enable_image_similarity", obs_module_text("EnableImageSimilarity"));
+	obs_property_set_modified_callback(p_enable_image_similarity, enable_image_similarity);
+
+	obs_properties_add_float_slider(props, "image_similarity_threshold",
+					obs_module_text("ImageSimilarityThreshold"), 0.0, 100.0, 1.0);
 
 
 
@@ -120,6 +130,7 @@ obs_properties_t *my_filter_get_properties(void *data)
 
 void my_filter_get_defaults(obs_data_t *settings)
 {
+	//obs_data_set_default_bool(settings, "advanced", false);
 	obs_data_set_default_bool(settings, "stop_when_source_is_inactive", true);
 }
 
@@ -141,6 +152,12 @@ void my_filter_update(void *data, obs_data_t *settings)
 	tf->isDisabled = true;
 
 	tf->stopWhenSourceIsInactive = obs_data_get_bool(settings, "stop_when_source_is_inactive");
+
+	tf->filterEveryXFrames = (int)obs_data_get_int(settings, "filter_every_x_frames");
+	tf->filterEveryXFramesCount = (int)(0);
+
+	tf->imageSimilarityThreshold = (float)obs_data_get_double(settings, "image_similarity_threshold");
+	tf->enableImageSimilarity = (float)obs_data_get_bool(settings, "enable_image_similarity");
 	
 	// TODO: other settings updates here...
 
@@ -166,6 +183,10 @@ void my_filter_update(void *data, obs_data_t *settings)
 	obs_log(LOG_INFO, "  Model: %s", tf->modelSelection.c_str());
 	//obs_log(LOG_INFO, "  Inference Device: %s", tf->useGPU.c_str());
 	//obs_log(LOG_INFO, "  Num Threads: %d", tf->numThreads);
+
+	obs_log(LOG_INFO, "  Filter Every X Frames: %d", tf->filterEveryXFrames);
+	obs_log(LOG_INFO, "  Enable Image Similarity: %s", tf->enableImageSimilarity ? "true" : "false");
+	obs_log(LOG_INFO, "  Image Similarity Threshold: %f", tf->imageSimilarityThreshold);
 
 	obs_log(LOG_INFO, "  Disabled: %s", tf->isDisabled ? "true" : "false");
 
@@ -265,9 +286,89 @@ void my_filter_destroy(void* data)
 	}
 }
 
+//static void processImageForMasks(struct my_filter *tf, const cv::Mat &imageBGRA, cv::Mat &backgroundMask)
+
 void my_filter_video_tick(void* data, float seconds)
 {
+	UNUSED_PARAMETER(seconds);
 
+	// Cast to shared_ptr pointer and create a local shared_ptr
+	auto *ptr = static_cast<std::shared_ptr<my_filter> *>(data);
+	if (!ptr) {
+		return;
+	}
+
+	// Create a local shared_ptr
+	// This guarantees the object stays alive for the duration of this function scope
+	// even if filter_destroy is called on the main thread
+	std::shared_ptr<my_filter> tf = *ptr;
+
+	if (!tf || tf->isDisabled) {
+		return;
+	}
+
+	if (!obs_source_enabled(tf->source)) {
+		return;
+	}
+
+	if (!tf->model) {
+		obs_log(LOG_ERROR, "Model is not initialized");
+		return;
+	}
+
+	cv::Mat imageBGRA;
+	{
+		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			// No data to process
+			return;
+		}
+		if (tf->inputBGRA.empty()) {
+			// No data to process
+			return;
+		}
+
+		imageBGRA = tf->inputBGRA.clone();
+	}
+
+	if (tf->enableImageSimilarity) {
+		if (!tf->lastImageBGRA.empty() && !imageBGRA.empty() && tf->lastImageBGRA.size() == imageBGRA.size()) {
+			// Calculate PSNR
+			double psnr = cv::PSNR(tf->lastImageBGRA, imageBGRA);
+
+			if (psnr > tf->imageSimilarityThreshold) {
+				// Skip processing when images are almost identical
+				return;
+			}
+		}
+
+		tf->lastImageBGRA = imageBGRA.clone();
+	}
+
+	// Don't need a background mask.
+	// TODO: We instead use multiple masks. Need to figure this out
+
+	tf->filterEveryXFramesCount++;
+	tf->filterEveryXFramesCount %= tf->filterEveryXFrames;
+
+	try {
+		if (tf->filterEveryXFramesCount != 0) {
+			// We are skipping processing of the mask for this frame.
+			// Instead, get the masks that were previously generated.
+			; // Do nothing
+		} else {
+			
+			// TODO: filter processing logic goes here!
+
+		}
+
+	
+	} catch (const ort::Exception &e) {
+		obs_log(LOG_ERROR, "ONNXRuntime Exception: %s", e.what());
+		// TODO: Fall back to the CPU if it makes sense <- does it???
+	} catch (const std::exception &e) {
+		obs_log(LOG_ERROR, "%s", e.what());
+	}
 }
 
 void my_filter_video_render(void* data, gs_effect_t* _effect)
