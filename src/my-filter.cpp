@@ -118,24 +118,94 @@ obs_properties_t *my_filter_get_properties(void *data)
 	return props;
 }
 
-void my_filter_get_defaults(obs_data_t *settings) 
+void my_filter_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_bool(settings, "stop_when_source_is_inactive", true);
 }
 
-void my_filter_activate(void *data) 
+void my_filter_update(void *data, obs_data_t *settings)
 {
+	obs_log(LOG_INFO, "My filter udpated");
 
+	// Cast to shared_ptr pointer and create a local shared_ptr
+	auto *ptr = static_cast<std::shared_ptr<my_filter> *>(data);
+	if (!ptr) {
+		return;
+	}
+
+	std::shared_ptr<my_filter> tf = *ptr;
+	if (!tf) {
+		return;
+	}
+
+	tf->isDisabled = true;
+
+	tf->stopWhenSourceIsInactive = obs_data_get_bool(settings, "stop_when_source_is_inactive");
+	
+	// TODO: other settings updates here...
+
+	const std::string newUseGpu = obs_data_get_string(settings, "useGPU");
+	const std::string newModel = obs_data_get_string(settings, "model_select");
+	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
+
+	// TODO: model / gpu / thread updates here...
+
+	obs_enter_graphics();
+
+	char *effect_path = obs_module_file(EFFECT_PATH);
+	gs_effect_destroy(tf->effect);
+	tf->effect = gs_effect_create_from_file(effect_path, NULL);
+	bfree(effect_path);
+
+	obs_leave_graphics();
+
+	// Log the currently selected options
+	obs_log(LOG_INFO, "My filter options:");
+	// name of the source that the filter is attached to
+	obs_log(LOG_INFO, "  Source: %s", obs_source_get_name(tf->source));
+	obs_log(LOG_INFO, "  Model: %s", tf->modelSelection.c_str());
+	//obs_log(LOG_INFO, "  Inference Device: %s", tf->useGPU.c_str());
+	//obs_log(LOG_INFO, "  Num Threads: %d", tf->numThreads);
+
+	obs_log(LOG_INFO, "  Disabled: %s", tf->isDisabled ? "true" : "false");
+
+
+#ifdef _WIN32
+	obs_log(LOG_INFO, "  Model file path: %S", tf->modelFilepath.c_str());
+#else
+	obs_log(LOG_INFO, "  Model file path: %s", tf->modelFilepath.c_str());
+#endif
+
+	// enable
+	tf->isDisabled = false;
 }
 
-void my_filter_deactivate(void *data) 
+void background_filter_activate(void *data)
 {
+	auto *ptr = static_cast<std::shared_ptr<my_filter> *>(data);
+	if (!ptr) {
+		return;
+	}
 
+	std::shared_ptr<my_filter> tf = *ptr;
+	if (tf && tf->stopWhenSourceIsInactive) {
+		obs_log(LOG_INFO, "My filter activated");
+		tf->isDisabled = false;
+	}
 }
 
-void my_filter_update(void *data, obs_data_t *settings) 
+void background_filter_deactivate(void *data)
 {
+	auto *ptr = static_cast<std::shared_ptr<my_filter> *>(data);
+	if (!ptr) {
+		return;
+	}
 
+	std::shared_ptr<my_filter> tf = *ptr;
+	if (tf && tf->stopWhenSourceIsInactive) {
+		obs_log(LOG_INFO, "My filter deactivated");
+		tf->isDisabled = true;
+	}
 }
 
 void* my_filter_create(obs_data_t* settings, obs_source_t* source)
@@ -153,6 +223,7 @@ void* my_filter_create(obs_data_t* settings, obs_source_t* source)
 		//instance->env.reset(new Ort::Env(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR, instanceName.c_str()));
 
 		//instance->modelSelection = MODEL_MEDIAPIPE;
+		instance->modelSelection = nullptr;
 
 		// Create a pointer to shared_ptr for the update call
 		auto ptr = new std::shared_ptr<my_filter>(instance);
